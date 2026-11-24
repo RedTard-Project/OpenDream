@@ -1,4 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
+using DMCompiler.Bytecode;
 using DMCompiler.Compiler;
 using DMCompiler.DM.Builders;
 
@@ -82,6 +84,16 @@ internal partial class DMCodeTree {
     private ObjectNode _root;
     private ObjectNode? _dmStandardRoot;
     private int _currentPass;
+    private int _procDeclCount;
+
+    /// <param name="ProcCallIndex">
+    /// The index of the proc declaration this is a static var of.
+    /// Only present when the initializer is a proc call.
+    /// </param>
+    private readonly record struct GlobalInit(DMObject Type, int GlobalId, DMExpression Value, int? ProcCallIndex);
+
+    /// <summary>The initializers of global vars, in the order the vars got defined</summary>
+    private readonly List<GlobalInit> _globalInits = new();
 
     public DMCodeTree(DMCompiler compiler) {
         // Yep, not _dmStandardRoot
@@ -136,7 +148,40 @@ internal partial class DMCodeTree {
                 varNode.LastError.Message);
         }
 
+        EmitGlobalInits();
         _compiler.GlobalInitProc.ResolveLabels();
+    }
+
+    private void EmitGlobalInits() {
+        void Emit(GlobalInit init) {
+            var proc = _compiler.GlobalInitProc;
+
+            proc.DebugSource(init.Value.Location);
+            init.Value.EmitPushValue(new(_compiler, init.Type, proc));
+            proc.Assign(DMReference.CreateGlobal(init.GlobalId));
+            proc.Pop();
+        }
+
+        // Vars can be defined in a later pass than ones declared after them, but static vars in procs that are
+        // initialized by a proc call must make those calls in declaration order.
+        // SS13 depends on this; a static var in the first proc of the DME is what creates its master controller.
+        var remainingCalls = new Queue<int>(_globalInits.Select(init => init.ProcCallIndex).OfType<int>().Order());
+        var heldCalls = new PriorityQueue<GlobalInit, (int ProcCallIndex, int DefineIndex)>();
+
+        for (int i = 0; i < _globalInits.Count; i++) {
+            var init = _globalInits[i];
+            if (init.ProcCallIndex is not { } procCallIndex) {
+                Emit(init);
+                continue;
+            }
+
+            heldCalls.Enqueue(init, (procCallIndex, i));
+            while (heldCalls.TryPeek(out var held, out var order) && order.ProcCallIndex == remainingCalls.Peek()) {
+                heldCalls.Dequeue();
+                remainingCalls.Dequeue();
+                Emit(held);
+            }
+        }
     }
 
     public void FinishDMStandard() {

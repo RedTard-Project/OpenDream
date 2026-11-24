@@ -13,25 +13,39 @@ public sealed class DMIResource : DreamResource {
     public Vector2i IconSize;
     public DMIParser.ParsedDMIDescription Description;
 
+    public readonly record struct DecodedDMI(Image<Rgba32> Image, DMIParser.ParsedDMIDescription Description);
+
     private readonly Dictionary<string, State> _states;
 
-    public DMIResource(int id, byte[] data) : base(id, data) {
+    public DMIResource(int id, byte[] data) : this(id, data, Decode(data)) { }
+
+    /// <param name="decoded">The result of <see cref="Decode"/> for this data. Gets disposed.</param>
+    public DMIResource(int id, byte[] data, DecodedDMI decoded) : base(id, data) {
         _states = new Dictionary<string, State>();
-        ProcessDMIData();
+        ProcessDMIData(decoded);
     }
 
     public override void UpdateData(byte[] data) {
         base.UpdateData(data);
-        ProcessDMIData();
+        ProcessDMIData(Decode(data));
     }
 
-    private void ProcessDMIData() {
-        using Stream dmiStream = new MemoryStream(Data);
+    /// <summary>
+    /// The part of loading a DMI that can be done on any thread
+    /// </summary>
+    public static DecodedDMI Decode(byte[] data) {
+        using Stream dmiStream = new MemoryStream(data);
         DMIParser.ParsedDMIDescription description = DMIParser.ParseDMI(dmiStream);
 
         dmiStream.Seek(0, SeekOrigin.Begin);
 
-        Image<Rgba32> image = Image.Load<Rgba32>(dmiStream);
+        return new(Image.Load<Rgba32>(dmiStream), description);
+    }
+
+    private void ProcessDMIData(DecodedDMI decoded) {
+        using var image = decoded.Image;
+        var description = decoded.Description;
+
         Texture = IoCManager.Resolve<IClyde>().LoadTextureFromImage(image, name: $"DMI Resource #{Id}");
         IconSize = new Vector2i(description.Width, description.Height);
         Description = description;

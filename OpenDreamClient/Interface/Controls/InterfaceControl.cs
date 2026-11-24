@@ -23,7 +23,7 @@ public abstract class InterfaceControl : InterfaceElement {
     public Vector2i AnchorPosition = Vector2i.Zero;
 
     protected ControlDescriptor ControlDescriptor => (ControlDescriptor) ElementDescriptor;
-    protected readonly ControlWindow? Window;
+    public readonly ControlWindow? Window;
 
     [SuppressMessage("ReSharper", "VirtualMemberCallInConstructor")]
     protected InterfaceControl(ControlDescriptor controlDescriptor, ControlWindow? window) : base(controlDescriptor) {
@@ -96,11 +96,16 @@ public abstract class InterfaceControl : InterfaceElement {
                 var size = new DMFPropertySize(value);
                 ControlDescriptor.Size = size;
 
-                // A size of 0 takes up the remaining space of the window as defined by the DMF
-                if (size.X == 0 && Window != null)
-                    size.X = Window.Size.X - ControlDescriptor.Pos.X;
-                if (size.Y == 0 && Window != null)
-                    size.Y = Window.Size.Y - ControlDescriptor.Pos.Y;
+                // A size of 0 takes up the remaining space of the window.
+                // A winset's size is relative to the current size of the window, instead of the one defined by the DMF.
+                if (Window != null) {
+                    var windowSize = manualWinset ? Window.CanvasSize : (Window.Size.X, Window.Size.Y);
+
+                    if (size.X == 0)
+                        size.X = windowSize.X - ControlDescriptor.Pos.X;
+                    if (size.Y == 0)
+                        size.Y = windowSize.Y - ControlDescriptor.Pos.Y;
+                }
 
                 value = size.AsRaw(); // May have been modified by the above
                 UIElement.SetSize = size.Vector;

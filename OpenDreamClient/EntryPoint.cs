@@ -45,6 +45,9 @@ public sealed partial class EntryPoint : GameClient {
     }
 
     public override void Init() {
+        // The formatting of numbers in commands and winsets isn't affected by the user's locale
+        CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+
         IComponentFactory componentFactory = IoCManager.Resolve<IComponentFactory>();
         componentFactory.DoAutoRegistrations();
 
@@ -97,6 +100,7 @@ public sealed partial class EntryPoint : GameClient {
     public override void Update(ModUpdateLevel level, FrameEventArgs frameEventArgs) {
         switch (level) {
             case ModUpdateLevel.FramePostEngine:
+                _dreamResource.FrameUpdate();
                 _dreamInterface.FrameUpdate(frameEventArgs);
                 _particleManager.FrameUpdate(frameEventArgs); //TODO remove when particles RT PR is merged
                 break;

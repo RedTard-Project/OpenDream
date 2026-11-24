@@ -6,7 +6,7 @@ namespace DMCompiler.DM;
 internal partial class DMCodeTree {
     private class ProcsNode() : TypeNode("proc");
 
-    private class ProcNode(DMCodeTree codeTree, DreamPath owner, DMASTProcDefinition procDef) : TypeNode(procDef.Name) {
+    private class ProcNode(DMCodeTree codeTree, int declIndex, DreamPath owner, DMASTProcDefinition procDef) : TypeNode(procDef.Name) {
         private string ProcName => procDef.Name;
         private bool IsOverride => procDef.IsOverride;
 
@@ -72,7 +72,7 @@ internal partial class DMCodeTree {
                 if (!varDecl.IsGlobal)
                     continue;
 
-                var procGlobalNode = new ProcGlobalVarNode(owner, proc, varDecl);
+                var procGlobalNode = new ProcGlobalVarNode(codeTree, declIndex, owner, proc, varDecl);
                 Children.Add(procGlobalNode);
                 codeTree._waitingNodes.Add(procGlobalNode);
             }
@@ -129,7 +129,7 @@ internal partial class DMCodeTree {
 
     public void AddProc(DreamPath owner, DMASTProcDefinition procDef) {
         var node = GetDMObjectNode(owner);
-        var procNode = new ProcNode(this, owner, procDef);
+        var procNode = new ProcNode(this, _procDeclCount++, owner, procDef);
 
         if (procDef is { Name: "New", IsOverride: false })
             _newProcs[owner] = procNode; // We need to be ready to define New() as soon as the type is created

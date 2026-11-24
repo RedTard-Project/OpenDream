@@ -4,14 +4,17 @@ using OpenDreamClient.Resources.ResourceTypes;
 using Robust.Shared.Configuration;
 using Robust.Shared.ContentPack;
 using Robust.Shared.Network;
+using Robust.Shared.Timing;
 using Robust.Shared.Utility;
 using System.Linq;
+using System.Threading.Tasks;
 using SpaceWizards.Sodium;
 
 namespace OpenDreamClient.Resources;
 
 public interface IDreamResourceManager {
     void Initialize();
+    void FrameUpdate();
     ResPath CreateCacheFile(string filename, string data);
     ResPath CreateCacheFile(string filename, byte[] data);
 
@@ -39,6 +42,13 @@ internal sealed partial class DreamResourceManager : IDreamResourceManager {
     [Dependency] private IResourceManager _resourceManager = default!;
     [Dependency] private IClientNetManager _netManager = default!;
     [Dependency] private IDynamicTypeFactory _typeFactory = default!;
+
+    /// <summary>
+    /// The most time to spend on finishing the loading of resources each frame, in milliseconds
+    /// </summary>
+    private const double MaxFrameLoadTime = 4;
+
+    private readonly Queue<Action> _decodedResources = new();
     [Dependency] private IConfigurationManager _cfg = default!;
 
     private ResPath _cacheDirectory;
@@ -122,25 +132,88 @@ internal sealed partial class DreamResourceManager : IDreamResourceManager {
                 _resourceCache[message.ResourceId].UpdateData(message.ResourceData); //we update instead of replacing so we don't have to replace the handle in everything that uses it
                 _resourceCache[message.ResourceId].OnUpdateCallbacks.ForEach(cb => cb.Invoke());
                 resource = _resourceCache[message.ResourceId];
+            } else if (entry.ResourceType == typeof(DMIResource)) {
+                LoadDMIInBackground(message.ResourceId, message.ResourceData);
+                return;
             } else {
                 resource = LoadResourceFromData(
                     entry.ResourceType,
                     message.ResourceId,
                     message.ResourceData);
-                _resourceCache[message.ResourceId] = resource;
             }
 
-            foreach (Action<DreamResource> callback in entry.LoadCallbacks) {
-                try {
-                    callback.Invoke(resource);
-                } catch (Exception e) {
-                    _sawmill.Fatal($"Exception while calling resource load callback: {e.Message}");
-                }
-            }
-
-            _loadingResources.Remove(message.ResourceId);
+            FinishLoading(message.ResourceId, resource);
         } else {
             throw new Exception($"Received unexpected resource packet for resource id {message.ResourceId}");
+        }
+    }
+
+    /// <summary>
+    /// Large DMIs can take over 100ms to decode, which is too much to do in one frame
+    /// </summary>
+    private void LoadDMIInBackground(int resourceId, byte[] data) {
+        Task.Run(() => {
+            Action finish;
+
+            try {
+                var decoded = DMIResource.Decode(data);
+
+                finish = () => {
+                    if (!_loadingResources.ContainsKey(resourceId)) { // We disconnected while this was loading
+                        decoded.Image.Dispose();
+                        return;
+                    }
+
+                    var resource = new DMIResource(resourceId, data, decoded);
+
+                    _resourceCache[resourceId] = resource;
+                    FinishLoading(resourceId, resource);
+                };
+            } catch (Exception e) {
+                finish = () => _sawmill.Error($"Failed to decode DMI with resource id {resourceId}: {e}");
+            }
+
+            lock (_decodedResources) {
+                _decodedResources.Enqueue(finish);
+            }
+        });
+    }
+
+    public void FrameUpdate() {
+        Stopwatch? stopwatch = null;
+
+        // Uploading textures can't be done in the background, so spread them out over multiple frames
+        while (stopwatch == null || stopwatch.Elapsed.TotalMilliseconds < MaxFrameLoadTime) {
+            Action? finish;
+
+            lock (_decodedResources) {
+                if (!_decodedResources.TryDequeue(out finish))
+                    return;
+            }
+
+            if (stopwatch == null) {
+                stopwatch = new Stopwatch();
+                stopwatch.Start();
+            }
+
+            try {
+                finish();
+            } catch (Exception e) {
+                _sawmill.Error($"Exception while loading a resource: {e}");
+            }
+        }
+    }
+
+    private void FinishLoading(int resourceId, DreamResource resource) {
+        if (!_loadingResources.Remove(resourceId, out var entry))
+            return;
+
+        foreach (Action<DreamResource> callback in entry.LoadCallbacks) {
+            try {
+                callback.Invoke(resource);
+            } catch (Exception e) {
+                _sawmill.Fatal($"Exception while calling resource load callback: {e.Message}");
+            }
         }
     }
 

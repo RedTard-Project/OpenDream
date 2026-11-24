@@ -18,6 +18,7 @@ public sealed partial class DummyDreamInterfaceManager : IDreamInterfaceManager 
     public ControlInfo? DefaultInfo => null;
     public ControlMap? DefaultMap => null;
     public ViewRange View => new(5);
+    public ViewBorders Borders => default;
     public bool ShowPopupMenus => true;
     public int IconSize => 32;
     public CursorHolder Cursors => null!;

@@ -35,6 +35,34 @@ internal sealed partial class DreamViewOverlay : Overlay {
     public readonly ShaderInstance BlockColorInstance;
     public readonly Dictionary<Color, RendererMetaData> MouseMapLookup = new();
     public readonly Dictionary<string, IRenderTexture> RenderSourceLookup = new();
+
+    /// <summary>
+    /// The render targets of plane masters that have nothing on their plane this frame
+    /// </summary>
+    private readonly HashSet<string> _emptyRenderSources = new();
+
+    /// <summary>
+    /// The render targets of plane masters that end up on the screen this frame
+    /// </summary>
+    private readonly HashSet<string> _neededRenderSources = new();
+
+    private readonly List<int> _sortedPlanes = new();
+
+    /// <summary>
+    /// Shaders with the parameters they're a key of. These aren't ever modified.
+    /// </summary>
+    private readonly Dictionary<ColorShaderKey, ShaderInstance> _colorShaders = new();
+
+    private const int MaxColorShaders = 512;
+
+    private readonly Func<IRenderTexture> _createPlaneRenderTarget;
+
+    /// <param name="BlendMode">Null for the shader that doesn't blend</param>
+    private readonly record struct ColorShaderKey(BlendMode? BlendMode, bool IsPlaneMaster, ColorMatrix ColorMatrix) {
+        public bool Equals(ColorShaderKey other) => BlendMode == other.BlendMode && IsPlaneMaster == other.IsPlaneMaster && ColorMatrix.Equals(other.ColorMatrix);
+
+        public override int GetHashCode() => HashCode.Combine(BlendMode, IsPlaneMaster, ColorMatrix.GetHashCode());
+    }
     public readonly HashSet<EntityUid> EntitiesInView = new();
 
     private const LookupFlags MapLookupFlags = LookupFlags.Approximate | LookupFlags.Uncontained;
@@ -126,6 +154,7 @@ internal sealed partial class DreamViewOverlay : Overlay {
         }
 
         _mapTextRenderer = new(_resourceCache, _tagManager);
+        _createPlaneRenderTarget = () => _clyde.CreateRenderTarget(_baseRenderTarget!.Size, new(RenderTargetColorFormat.Rgba8Srgb), name: "Plane Master");
     }
 
     protected override void Draw(in OverlayDrawArgs args) {
@@ -148,6 +177,15 @@ internal sealed partial class DreamViewOverlay : Overlay {
         _appearanceSystem.ResetFilterUsageFlags();
 
         RenderSourceLookup.Clear();
+        _emptyRenderSources.Clear();
+        _neededRenderSources.Clear();
+
+        if (_colorShaders.Count > MaxColorShaders) { // Probably an animated color
+            foreach (var shader in _colorShaders.Values)
+                shader.Dispose();
+
+            _colorShaders.Clear();
+        }
 
         _renderTargetPool.HandleEndOfFrame();
 
@@ -489,16 +527,138 @@ internal sealed partial class DreamViewOverlay : Overlay {
         else
             colorMatrix = iconMetaData.ColorMatrixToApply;
 
-        var blendAndColor = _blendModeInstances[blendMode];
         if (!iconMetaData.IsPlaneMaster && colorMatrix.Equals(ColorMatrix.Identity)) // We can get away with no duplication
-            return blendAndColor;
+            return _blendModeInstances[blendMode];
 
-        // RT's batching is a little broken and so we must duplicate the shader if we modify its parameters
-        blendAndColor = blendAndColor.Duplicate();
-        blendAndColor.SetParameter("colorMatrix", colorMatrix.GetMatrix4());
-        blendAndColor.SetParameter("offsetVector", colorMatrix.GetOffsetVector());
-        blendAndColor.SetParameter("isPlaneMaster", iconMetaData.IsPlaneMaster);
-        return blendAndColor;
+        return GetColorShader(blendMode, iconMetaData.IsPlaneMaster, colorMatrix);
+    }
+
+    /// <summary>
+    /// Get a shader with the given parameters
+    /// </summary>
+    /// <param name="blendMode">How to blend, or null to not do so</param>
+    /// <remarks>RT's batching is a little broken and so a shader can't have its parameters modified after it's used</remarks>
+    public ShaderInstance GetColorShader(BlendMode? blendMode, bool isPlaneMaster, in ColorMatrix colorMatrix) {
+        var key = new ColorShaderKey(blendMode, isPlaneMaster, colorMatrix);
+
+        if (!_colorShaders.TryGetValue(key, out var shader)) {
+            shader = (blendMode == null ? ColorInstance : _blendModeInstances[blendMode.Value]).Duplicate();
+            shader.SetParameter("colorMatrix", colorMatrix.GetMatrix4());
+            shader.SetParameter("offsetVector", colorMatrix.GetOffsetVector());
+            shader.SetParameter("isPlaneMaster", isPlaneMaster);
+            _colorShaders.Add(key, shader);
+        }
+
+        return shader;
+    }
+
+    /// <summary>
+    /// Whether this is only meant to draw a render source, and there's nothing to draw
+    /// </summary>
+    public bool IsEmptyRenderSource(RendererMetaData sprite) {
+        if (!sprite.HasRenderSource || sprite.Particles != null || sprite.Maptext != null || sprite.KeepTogetherGroup?.Count > 0)
+            return false;
+
+        return IsEmptyRenderSource(sprite.RenderSource) ||
+               (!RenderSourceLookup.ContainsKey(sprite.RenderSource!) && sprite.MainIcon?.DMI == null);
+    }
+
+    /// <summary>
+    /// Whether this is the render_target of a plane master with nothing on its plane
+    /// </summary>
+    public bool IsEmptyRenderSource(string? renderSource) {
+        return !string.IsNullOrEmpty(renderSource) && _emptyRenderSources.Contains(renderSource);
+    }
+
+    /// <summary>
+    /// Finds which planes have nothing on them, and which ones are part of the final image.
+    /// Multi-z SS13 maps have hundreds of planes, with most being for floors that can't be seen.
+    /// </summary>
+    private void UpdatePlaneVisibility() {
+        _sortedPlanes.Clear();
+        _sortedPlanes.AddRange(Planes.Keys);
+        _sortedPlanes.Sort();
+
+        // Planes can be each other's render sources, so begin with all of them being empty and then find out which ones aren't
+        foreach (int planeIndex in _sortedPlanes) {
+            var plane = Planes[planeIndex];
+
+            plane.IsNeeded = false;
+            plane.IsEmpty = true;
+            if (!string.IsNullOrEmpty(plane.Master?.RenderTarget))
+                _emptyRenderSources.Add(plane.Master.RenderTarget);
+        }
+
+        bool changed;
+        do {
+            changed = false;
+
+            // A render source is usually a lower plane, so it's rare to need to do this more than a few times
+            foreach (int planeIndex in _sortedPlanes) {
+                var plane = Planes[planeIndex];
+                if (!plane.IsEmpty || !plane.HasVisibleContents(this))
+                    continue;
+
+                plane.IsEmpty = false;
+                changed = true;
+                if (!string.IsNullOrEmpty(plane.Master?.RenderTarget))
+                    _emptyRenderSources.Remove(plane.Master.RenderTarget);
+            }
+        } while (changed);
+
+        // These were already drawn, so there's nothing to skip if they're not needed
+        foreach (var sprite in _spriteContainer) {
+            if (!string.IsNullOrEmpty(sprite.RenderTarget) && !sprite.IsPlaneMaster)
+                AddNeededRenderSources(sprite);
+        }
+
+        // Go backwards from the planes that are drawn to the screen
+        do {
+            changed = false;
+
+            for (int i = _sortedPlanes.Count - 1; i >= 0; i--) {
+                var plane = Planes[_sortedPlanes[i]];
+                if (plane.IsNeeded)
+                    continue;
+
+                var isUsed = !string.IsNullOrEmpty(plane.Master?.RenderTarget) && _neededRenderSources.Contains(plane.Master.RenderTarget);
+                if (!isUsed && (plane.IsEmpty || !plane.DrawsToScreen))
+                    continue;
+
+                plane.IsNeeded = true;
+                changed = true;
+                if (plane.IsEmpty) // Only needed so that it gets cleared
+                    continue;
+
+                if (plane.Master != null)
+                    AddNeededRenderSources(plane.Master);
+                foreach (var sprite in plane.Sprites)
+                    AddNeededRenderSources(sprite);
+            }
+        } while (changed);
+    }
+
+    private void AddNeededRenderSources(RendererMetaData sprite) {
+        if (sprite.HasRenderSource && !IsEmptyRenderSource(sprite))
+            _neededRenderSources.Add(sprite.RenderSource!);
+
+        foreach (var filter in sprite.MainIcon?.Appearance?.Filters ?? []) {
+            var renderSource = filter switch {
+                DreamFilterAlpha alpha => alpha.RenderSource,
+                DreamFilterDisplace displace => displace.RenderSource,
+                DreamFilterLayer layer => layer.RenderSource,
+                _ => null
+            };
+
+            if (!string.IsNullOrEmpty(renderSource))
+                _neededRenderSources.Add(renderSource);
+        }
+
+        if (sprite.KeepTogetherGroup == null)
+            return;
+
+        foreach (var keepTogether in sprite.KeepTogetherGroup)
+            AddNeededRenderSources(keepTogether);
     }
 
     public void DrawIcon(DrawingHandleWorld handle, Vector2i renderTargetSize, RendererMetaData iconMetaData, Vector2 positionOffset) {
@@ -611,18 +771,16 @@ internal sealed partial class DreamViewOverlay : Overlay {
 
             if (!string.IsNullOrEmpty(sprite.RenderTarget)) {
                 //if this sprite has a render target, draw it to a slate instead. If it needs to be drawn on the map, a second sprite instance will already have been created for that purpose
-                if (!RenderSourceLookup.TryGetValue(sprite.RenderTarget, out var tmpRenderTarget)) {
-                    var size = sprite.IsPlaneMaster ? viewportSize : sprite.MainIcon?.DMI?.IconSize ?? viewportSize;
-                    tmpRenderTarget = _renderTargetPool.Rent(size);
-                    RenderSourceLookup.Add(sprite.RenderTarget, tmpRenderTarget);
-                    _renderTargetPool.ReturnAtEndOfFrame(tmpRenderTarget);
-                }
-
                 if (sprite.IsPlaneMaster) { //if this is also a plane master
                     sprite.Position = Vector2.Zero; //plane masters should not have a position offset
-                    plane.Master = sprite;
-                    plane.SetTemporaryRenderTarget(tmpRenderTarget);
+                    RenderSourceLookup[sprite.RenderTarget] = plane.SetMasterWithTarget(sprite, _createPlaneRenderTarget);
                 } else { //if not a plane master, draw the sprite to the render target
+                    if (!RenderSourceLookup.TryGetValue(sprite.RenderTarget, out var tmpRenderTarget)) {
+                        tmpRenderTarget = _renderTargetPool.Rent(sprite.MainIcon?.DMI?.IconSize ?? viewportSize);
+                        RenderSourceLookup.Add(sprite.RenderTarget, tmpRenderTarget);
+                        _renderTargetPool.ReturnAtEndOfFrame(tmpRenderTarget);
+                    }
+
                     //note we don't draw this to the mouse-map because that's handled when the RenderTarget is used as a source later
                     DrawOnRenderTarget(handle, tmpRenderTarget, sprite);
                 }
@@ -653,18 +811,20 @@ internal sealed partial class DreamViewOverlay : Overlay {
     }
 
     private void DrawPlanes(DrawingHandleWorld handle, Box2 worldAABB) {
+        UpdatePlaneVisibility();
+
         using (var _ = _prof.Group("draw planes map")) {
             handle.RenderInRenderTarget(_baseRenderTarget!, () => {
-                foreach (int planeIndex in Planes.Keys.Order()) {
+                foreach (int planeIndex in _sortedPlanes) {
                     var plane = Planes[planeIndex];
 
                     plane.Draw(this, handle, worldAABB);
 
-                    if (plane.Master != null) {
-                        // Don't draw this to the base render target if it has a RenderTarget starting with '*'
-                        if (plane.Master.RenderTarget?.StartsWith('*') is true)
-                            continue;
+                    // Don't draw this to the base render target if it has a RenderTarget starting with '*'
+                    if (plane.IsEmpty || !plane.DrawsToScreen)
+                        continue;
 
+                    if (plane.Master != null) {
                         plane.Master.TextureOverride = plane.RenderTarget.Texture;
                         DrawIcon(handle, _baseRenderTarget!.Size, plane.Master, Vector2.Zero);
                     } else {
@@ -679,7 +839,7 @@ internal sealed partial class DreamViewOverlay : Overlay {
         // TODO: Can this only be done once the user clicks?
         using (_prof.Group("draw planes mouse map")) {
             handle.RenderInRenderTarget(_mouseMapRenderTarget!, () => {
-                foreach (int planeIndex in Planes.Keys.Order())
+                foreach (int planeIndex in _sortedPlanes)
                     Planes[planeIndex].DrawMouseMap(handle, this, _mouseMapRenderTarget!.Size, worldAABB);
             }, new Color());
         }
@@ -754,11 +914,14 @@ internal sealed partial class DreamViewOverlay : Overlay {
                 if (sprite.ScreenLocation.MapControl != null) // Don't render screen objects meant for other map controls
                     continue;
 
+                var borders = _interfaceManager.Borders;
+                Vector2 viewOffset = worldAABB.BottomLeft + borders.BottomLeft;
                 Vector2i dmiIconSize = sprite.Icon.DMI?.IconSize ?? new(IconSize, IconSize);
-                Vector2 position = sprite.ScreenLocation.GetViewPosition(worldAABB.BottomLeft, _interfaceManager.View, IconSize, dmiIconSize);
-                Vector2 iconSize = sprite.Icon.DMI == null ? Vector2.Zero : sprite.Icon.DMI.IconSize / (float)IconSize;
-                for (int x = 0; x < sprite.ScreenLocation.RepeatX; x++) {
-                    for (int y = 0; y < sprite.ScreenLocation.RepeatY; y++) {
+                Vector2 position = sprite.ScreenLocation.GetViewPosition(viewOffset, _interfaceManager.View, borders, IconSize, dmiIconSize);
+                Vector2 iconSize = dmiIconSize / (float)IconSize;
+                Vector2i repeats = sprite.ScreenLocation.GetRepeats(_interfaceManager.View, borders, iconSize);
+                for (int x = 0; x < repeats.X; x++) {
+                    for (int y = 0; y < repeats.Y; y++) {
                         tValue = 0;
                         ProcessIconComponents(sprite.Icon, position + iconSize * new Vector2(x, y), uid, true, false, ref tValue, _spriteContainer, seeVis);
                     }

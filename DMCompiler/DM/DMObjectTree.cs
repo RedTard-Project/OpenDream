@@ -71,6 +71,7 @@ internal class DMObjectTree(DMCompiler compiler) {
                 case "savefile":
                 case "world":
                 case "callee":
+                case "dm_filter":
                     parent = GetOrCreateDMObject(DreamPath.Root);
                     break;
                 default:

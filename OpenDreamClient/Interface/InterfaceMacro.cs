@@ -145,6 +145,14 @@ internal struct ParsedKeybind {
         {"ADD", Keyboard.Key.NumpadAdd},
         {"SUBTRACT", Keyboard.Key.NumpadSubtract},
         {"DIVIDE", Keyboard.Key.NumpadDivide},
+        {"DECIMAL", Keyboard.Key.NumpadDecimal},
+        {"-", Keyboard.Key.Minus},
+        {"=", Keyboard.Key.Equal},
+        {"[", Keyboard.Key.LBracket},
+        {"]", Keyboard.Key.RBracket},
+        {"\\", Keyboard.Key.BackSlash},
+        {"'", Keyboard.Key.Apostrophe},
+        {"/", Keyboard.Key.Slash},
         {";", Keyboard.Key.SemiColon}, // undocumented but works in BYOND
         {",", Keyboard.Key.Comma},
         {".", Keyboard.Key.Period},
@@ -165,18 +173,28 @@ internal struct ParsedKeybind {
         if (keyToKeyName == null) {
             keyToKeyName = new Dictionary<Key, string>();
             foreach (KeyValuePair<string, Key> entry in keyNameToKey) {
-                keyToKeyName[entry.Value] = entry.Key;
+                keyToKeyName[entry.Value] = ToByondCasing(entry.Key);
             }
         }
 
         return keyToKeyName.GetValueOrDefault(key);
     }
 
+    /// <summary>
+    /// The [[*]] of an ANY macro is "Northeast" and "Numpad0", but "F1" and "W"
+    /// </summary>
+    private static string ToByondCasing(string keyName) {
+        return keyName is "LWIN" or "RWIN" || keyName.Length < 3
+            ? keyName
+            : keyName[..1] + keyName[1..].ToLowerInvariant();
+    }
+
     public static ParsedKeybind Parse(string keybind) {
         ParsedKeybind parsed = new ParsedKeybind();
 
         bool foundKey = false;
-        string[] parts = keybind.ToUpperInvariant().Split('+');
+        // A '+' in a winset's params may have been decoded to a space
+        string[] parts = keybind.ToUpperInvariant().Split(['+', ' '], StringSplitOptions.RemoveEmptyEntries);
         foreach (string part in parts) {
             switch (part) {
                 case "UP":

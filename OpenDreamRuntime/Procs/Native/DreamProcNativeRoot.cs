@@ -380,6 +380,9 @@ internal static class DreamProcNativeRoot {
         } else if (arg1.TryGetValueAsDreamObject<DreamObjectSavefile>(out var savefile)) {
             srcFile = savefile.Resource;
         } else if (arg1.TryGetValueAsString(out var srcPath)) {
+            if (!bundle.ResourceManager.DoesFileExist(srcPath))
+                return new DreamValue(0); // Copying a file that doesn't exist isn't a runtime error
+
             srcFile = bundle.ResourceManager.LoadResource(srcPath);
         }
 
