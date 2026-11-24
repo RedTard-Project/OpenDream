@@ -50,6 +50,11 @@ internal class Dereference : LValue {
     public override bool PathIsFuzzy => Path == null;
     public override DMComplexValueType ValType { get; }
 
+    /// <summary>
+    /// Whether this ends in a proc call
+    /// </summary>
+    public bool IsProcCall => _operations[^1] is CallOperation;
+
     private readonly DMExpression _expression;
     private readonly Operation[] _operations;
 
@@ -334,7 +339,37 @@ internal sealed class ScopeReference(DMObjectTree objectTree, Location location,
 
     public override string GetNameof(ExpressionContext ctx) => dmVar.Name;
 
+    /// <summary>
+    /// path::list_var gives a new copy of the list the var is initialized with
+    /// </summary>
+    public (DMObject Owner, DMExpression Value)? GetInitialList() {
+        if (expression is not IConstantPath || expression.Path is not { } path ||
+            !objectTree.TryGetDMObject(path, out var owner))
+            return null;
+
+        var initial = owner.GetRuntimeInitialValue(identifier);
+        return initial?.Value switch {
+            List or AList => initial,
+            ScopeReference scopeReference => scopeReference.GetInitialList(),
+            _ => null
+        };
+    }
+
+    public override void EmitPushValue(ExpressionContext ctx) {
+        if (GetInitialList() is { } initialList) {
+            initialList.Value.EmitPushValue(new(ctx.Compiler, initialList.Owner, ctx.Proc));
+            return;
+        }
+
+        base.EmitPushValue(ctx);
+    }
+
     public override bool TryAsConstant(DMCompiler compiler, [NotNullWhen(true)] out Constant? constant) {
+        if (GetInitialList() != null) {
+            constant = null;
+            return false;
+        }
+
         if (expression is Field or GlobalField && dmVar.TryAsConstant(compiler, out constant)) {
             return true;
         }

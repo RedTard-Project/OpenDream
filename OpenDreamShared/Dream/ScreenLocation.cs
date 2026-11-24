@@ -31,12 +31,15 @@ public sealed class ScreenLocation {
     public string? MapControl;
     public HorizontalAnchor HorizontalAnchor;
     public VerticalAnchor VerticalAnchor;
+
+    /// <summary>
+    /// Whether the anchor had a SCREEN_ prefix, making it relative to the view and its borders instead of just the view
+    /// </summary>
+    public bool HorizontalScreenAnchor, VerticalScreenAnchor;
+
     public int X, Y;
     public int PixelOffsetX, PixelOffsetY;
     public ScreenLocation? Range;
-
-    public int RepeatX => Range?.X - X + 1 ?? 1;
-    public int RepeatY => Range?.Y - Y + 1 ?? 1;
 
     private static ISawmill Sawmill => Logger.GetSawmill("opendream.screen_loc_parser");
 
@@ -57,11 +60,12 @@ public sealed class ScreenLocation {
     }
 
     public ScreenLocation(int x, int y, int iconSize) {
-        X = x / iconSize;
-        Y = y / iconSize;
+        // These are negative when on the border outside the view
+        X = (int)MathF.Floor((float)x / iconSize);
+        Y = (int)MathF.Floor((float)y / iconSize);
 
-        PixelOffsetX = x % iconSize;
-        PixelOffsetY = y % iconSize;
+        PixelOffsetX = x - X * iconSize;
+        PixelOffsetY = y - Y * iconSize;
         Range = null;
     }
 
@@ -71,28 +75,87 @@ public sealed class ScreenLocation {
         ParseScreenLoc(screenLocation);
     }
 
-    public Vector2 GetViewPosition(Vector2 viewOffset, ViewRange view, float tileSize, Vector2i iconSize) {
+    /// <param name="viewOffset">The position of the bottom-left of the view, not including its borders</param>
+    public Vector2 GetViewPosition(Vector2 viewOffset, ViewRange view, ViewBorders borders, float tileSize, Vector2i iconSize) {
         // TODO: LEFT/RIGHT/TOP/BOTTOM need to stick to the edge of the visible map if the map's container is smaller than the map itself
-        
+
         float x = (X + PixelOffsetX / tileSize);
         x += HorizontalAnchor switch {
-            HorizontalAnchor.West or HorizontalAnchor.Left => 0,
+            HorizontalAnchor.West or HorizontalAnchor.Left => HorizontalScreenAnchor ? -borders.Left : 0,
             HorizontalAnchor.Center => view.CenterX,
-            HorizontalAnchor.East => view.Width - 1,
+            HorizontalAnchor.East => view.Width - 1 + (HorizontalScreenAnchor ? borders.Right : 0),
             HorizontalAnchor.Right => view.Width - (iconSize.X / tileSize),
             _ => throw new Exception($"Invalid horizontal anchor {HorizontalAnchor}")
         };
 
         float y = (Y + PixelOffsetY / tileSize);
         y += VerticalAnchor switch {
-            VerticalAnchor.South or VerticalAnchor.Bottom => 0,
+            VerticalAnchor.South or VerticalAnchor.Bottom => VerticalScreenAnchor ? -borders.Bottom : 0,
             VerticalAnchor.Center => view.CenterY,
-            VerticalAnchor.North => view.Height - 1,
+            VerticalAnchor.North => view.Height - 1 + (VerticalScreenAnchor ? borders.Top : 0),
             VerticalAnchor.Top => view.Height - (iconSize.Y / tileSize),
             _ => throw new Exception($"Invalid vertical anchor {VerticalAnchor}")
         };
 
         return viewOffset + new Vector2(x, y);
+    }
+
+    /// <summary>
+    /// How many times a screen object using this is repeated on each axis
+    /// </summary>
+    /// <param name="step">The distance between each repeat, in tiles</param>
+    public Vector2i GetRepeats(ViewRange view, ViewBorders borders, Vector2 step) {
+        if (Range == null)
+            return Vector2i.One;
+
+        // Pixel offsets don't affect how many tiles the range covers
+        var start = new Vector2(X, Y);
+        var end = new Vector2(Range.X, Range.Y);
+        start += GetAnchorTile(view, borders);
+        end += Range.GetAnchorTile(view, borders);
+
+        return new Vector2i(
+            Math.Max(1, (int)MathF.Floor((end.X - start.X) / step.X) + 1),
+            Math.Max(1, (int)MathF.Floor((end.Y - start.Y) / step.Y) + 1));
+    }
+
+    /// <summary>
+    /// Expands the borders to fit a screen object using this
+    /// </summary>
+    /// <param name="iconTiles">The amount of tiles covered by the object's icon</param>
+    public void ExpandBorders(ViewRange view, Vector2i iconTiles, ref ViewBorders borders) {
+        // These are always within the map control
+        bool horizontal = !HorizontalScreenAnchor && HorizontalAnchor is not HorizontalAnchor.Left and not HorizontalAnchor.Right;
+        bool vertical = !VerticalScreenAnchor && VerticalAnchor is not VerticalAnchor.Bottom and not VerticalAnchor.Top;
+
+        // Pixel offsets never create a border
+        var tile = GetAnchorTile(view, default) + new Vector2i(X, Y);
+
+        if (horizontal) {
+            borders.Left = Math.Max(borders.Left, -tile.X);
+            borders.Right = Math.Max(borders.Right, tile.X + iconTiles.X - view.Width);
+        }
+
+        if (vertical) {
+            borders.Bottom = Math.Max(borders.Bottom, -tile.Y);
+            borders.Top = Math.Max(borders.Top, tile.Y + iconTiles.Y - view.Height);
+        }
+
+        Range?.ExpandBorders(view, iconTiles, ref borders);
+    }
+
+    private Vector2i GetAnchorTile(ViewRange view, ViewBorders borders) {
+        return new Vector2i(
+            HorizontalAnchor switch {
+                HorizontalAnchor.Center => view.CenterX,
+                HorizontalAnchor.East or HorizontalAnchor.Right => view.Width - 1 + (HorizontalScreenAnchor ? borders.Right : 0),
+                _ => HorizontalScreenAnchor ? -borders.Left : 0
+            },
+            VerticalAnchor switch {
+                VerticalAnchor.Center => view.CenterY,
+                VerticalAnchor.North or VerticalAnchor.Top => view.Height - 1 + (VerticalScreenAnchor ? borders.Top : 0),
+                _ => VerticalScreenAnchor ? -borders.Bottom : 0
+            });
     }
 
     public override string ToString() {
@@ -128,7 +191,10 @@ public sealed class ScreenLocation {
             X = 0;
             Y = 0;
 
-            (HorizontalAnchor, VerticalAnchor) = coordinateSplit[0].Trim() switch {
+            var keyword = StripScreenPrefix(coordinateSplit[0].Trim(), out bool screenAnchor);
+
+            HorizontalScreenAnchor = VerticalScreenAnchor = screenAnchor;
+            (HorizontalAnchor, VerticalAnchor) = keyword switch {
                 "CENTER" => (HorizontalAnchor.Center, VerticalAnchor.Center),
                 "NORTHWEST" => (HorizontalAnchor.West, VerticalAnchor.North),
                 "TOPLEFT" => (HorizontalAnchor.Left, VerticalAnchor.Top),
@@ -146,6 +212,16 @@ public sealed class ScreenLocation {
 
         bool swappedAxis = ParseScreenLocCoordinate(coordinateSplit[0], true);
         ParseScreenLocCoordinate(coordinateSplit[1], swappedAxis);
+    }
+
+    /// <summary>
+    /// SCREEN_SOUTHWEST, SCREEN_EAST, etc. are relative to the view and its borders instead of just the view
+    /// </summary>
+    private static string StripScreenPrefix(string keyword, out bool hadPrefix) {
+        const string prefix = "SCREEN_";
+
+        hadPrefix = keyword.StartsWith(prefix, StringComparison.Ordinal);
+        return hadPrefix ? keyword[prefix.Length..] : keyword;
     }
 
     /// <summary>
@@ -195,7 +271,7 @@ public sealed class ScreenLocation {
                 offsetStr = piece;
             }
 
-            switch (offsetStr) {
+            switch (StripScreenPrefix(offsetStr, out bool screenAnchor)) {
                 case "CENTER":
                     if (settingHorizontal)
                         HorizontalAnchor = HorizontalAnchor.Center;
@@ -240,7 +316,7 @@ public sealed class ScreenLocation {
 
                 // A normal number
                 default:
-                    if (!float.TryParse(offsetStr, out var offset))
+                    if (!float.TryParse(offsetStr, CultureInfo.InvariantCulture, out var offset))
                         Sawmill.Error($"Invalid offset {offsetStr} in {coordinate}");
 
                     coordinateResult += offset;
@@ -250,18 +326,26 @@ public sealed class ScreenLocation {
                     break;
             }
 
+            if (screenAnchor) {
+                if (settingHorizontal)
+                    HorizontalScreenAnchor = true;
+                else
+                    VerticalScreenAnchor = true;
+            }
+
             isFirstNumber = false;
         }
 
         // Convert decimal numbers to a pixel offset
-        double fractionalOffset = coordinateResult - Math.Floor(coordinateResult);
+        int wholeCoordinate = (int)Math.Floor(coordinateResult);
+        double fractionalOffset = coordinateResult - wholeCoordinate;
         pixelOffsetResult += (int)(32 * fractionalOffset);
 
         if (settingHorizontal) {
-            X = (int)coordinateResult;
+            X = wholeCoordinate;
             PixelOffsetX = pixelOffsetResult;
         } else {
-            Y = (int)coordinateResult;
+            Y = wholeCoordinate;
             PixelOffsetY = pixelOffsetResult;
         }
 

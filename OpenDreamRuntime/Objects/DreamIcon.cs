@@ -315,12 +315,12 @@ public abstract class DreamIconOperationBlend : IDreamIconOperation {
     }
 
     private readonly BlendType _type;
-    private readonly int _xOffset, _yOffset;
+    protected readonly int XOffset, YOffset;
 
     protected DreamIconOperationBlend(BlendType type, int xOffset, int yOffset) {
         _type = type;
-        _xOffset = xOffset;
-        _yOffset = yOffset;
+        XOffset = xOffset;
+        YOffset = yOffset;
     }
 
     public virtual void OnApply(DreamIcon icon) { }
@@ -398,6 +398,7 @@ public abstract class DreamIconOperationBlend : IDreamIconOperation {
 
 public sealed class DreamIconOperationBlendImage : DreamIconOperationBlend {
     private readonly Image<Rgba32> _blending;
+    private readonly int _blendingWidth, _blendingHeight;
     private readonly ParsedDMIState? _blendingState;
 
     public DreamIconOperationBlendImage(BlendType type, int xOffset, int yOffset, DreamValue blending) : base(type, xOffset, yOffset) {
@@ -409,6 +410,8 @@ public sealed class DreamIconOperationBlendImage : DreamIconOperationBlend {
         }
 
         _blending = blendingIcon.Texture;
+        _blendingWidth = blendingIcon.DMI.Width;
+        _blendingHeight = blendingIcon.DMI.Height;
         _blendingState = blendingIcon.DMI.States.Values.FirstOrDefault();
     }
 
@@ -444,20 +447,26 @@ public sealed class DreamIconOperationBlendImage : DreamIconOperationBlend {
 
         var blendingFrame = blendingDirFrames[frame];
 
-        // Use the smaller of the two sizes if they're different
-        // TODO: 1,1 should be bottom left, not top left
-        bounds = UIBox2i.FromDimensions(bounds.Left, bounds.Top, Math.Min(_blending.Width, bounds.Width),
-            Math.Min(_blending.Height, bounds.Height));
+        // The bottom-left of the blending icon is placed at (XOffset, YOffset), with (1, 1) being our bottom-left
+        int blendLeft = bounds.Left + XOffset - 1;
+        int blendTop = bounds.Bottom - (YOffset - 1) - _blendingHeight;
+
+        // Nothing outside our own frame gets drawn to
+        bounds = new UIBox2i(
+            Math.Max(bounds.Left, blendLeft),
+            Math.Max(bounds.Top, blendTop),
+            Math.Min(bounds.Right, blendLeft + _blendingWidth),
+            Math.Min(bounds.Bottom, blendTop + _blendingHeight));
+        if (bounds.Left >= bounds.Right || bounds.Top >= bounds.Bottom)
+            return;
 
         _blending.ProcessPixelRows(accessor => {
-            // TODO: x & y offsets
-
             for (int y = bounds.Top; y < bounds.Bottom; y++) {
-                var row = accessor.GetRowSpan(blendingFrame.Y + y - bounds.Top);
+                var row = accessor.GetRowSpan(blendingFrame.Y + y - blendTop);
 
                 for (int x = bounds.Left; x < bounds.Right; x++) {
                     int dstPixelPosition = (y * imageSpan) + x;
-                    Rgba32 src = row[blendingFrame.X + x - bounds.Left];
+                    Rgba32 src = row[blendingFrame.X + x - blendLeft];
 
                     BlendPixel(pixels, dstPixelPosition, src);
                 }
@@ -622,10 +631,10 @@ public sealed class DreamIconOperationShift(Vector2i shift, bool wrap) : IDreamI
         for (int y = bounds.Top; y < bounds.Bottom; y++) {
             bool wrappingY = false;
             var relativeY = y - bounds.Top + shiftY; // this one is backwards because icons are top to bottom in RT
-            if(relativeY < bounds.Top) {
+            if(relativeY < 0) {
                 relativeY += bounds.Height;
                 wrappingY = true;
-            } else if (relativeY >= bounds.Bottom) {
+            } else if (relativeY >= bounds.Height) {
                 relativeY -= bounds.Height;
                 wrappingY = true;
             }
@@ -633,10 +642,10 @@ public sealed class DreamIconOperationShift(Vector2i shift, bool wrap) : IDreamI
             for (int x = bounds.Left; x < bounds.Right; x++) {
                 bool wrappingX = false;
                 var relativeX = x - bounds.Left - shiftX;
-                if(relativeX < bounds.Left) {
+                if(relativeX < 0) {
                     relativeX += bounds.Width;
                     wrappingX = true;
-                } else if (relativeX >= bounds.Right) {
+                } else if (relativeX >= bounds.Width) {
                     relativeX -= bounds.Width;
                     wrappingX = true;
                 }
@@ -706,7 +715,7 @@ public sealed class DreamIconOperationTurn(float angle) : IDreamIconOperation {
             for (int x = bounds.Left; x < bounds.Right; x++) {
                 int dstPixelPosition = (y * imageSpan) + x;
 
-                copy[y, x] = pixels[dstPixelPosition];
+                copy[y - bounds.Top, x - bounds.Left] = pixels[dstPixelPosition];
             }
         }
 
@@ -714,12 +723,14 @@ public sealed class DreamIconOperationTurn(float angle) : IDreamIconOperation {
         for (int y = bounds.Top; y < bounds.Bottom; y++) {
             for (int x = bounds.Left; x < bounds.Right; x++) {
                 int dstPixelPosition = (y * imageSpan) + x;
+                int relativeX = x - bounds.Left;
+                int relativeY = y - bounds.Top;
 
                 pixels[dstPixelPosition] = _degrees switch {
-                    90 => copy[size - 1 - x, y],
-                    180 => copy[size - 1 - y, size - 1 - x],
-                    270 => copy[x, size - 1 - y],
-                    _ => copy[y, x]
+                    90 => copy[size - 1 - relativeX, relativeY],
+                    180 => copy[size - 1 - relativeY, size - 1 - relativeX],
+                    270 => copy[relativeX, size - 1 - relativeY],
+                    _ => copy[relativeY, relativeX]
                 };
             }
         }

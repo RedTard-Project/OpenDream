@@ -665,6 +665,8 @@ internal sealed class In(Location location, DMExpression expr, DMExpression cont
 
 internal abstract class AssignmentBinaryOp(Location location, DMExpression lhs, DMExpression rhs)
     : BinaryOp(location, lhs, rhs) {
+    public DMExpression Value => RHS;
+
     /// <summary>
     /// Generic interface for emitting the assignment operation. Has its conditionality and reference generation already handled.
     /// </summary>

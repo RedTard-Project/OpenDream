@@ -526,13 +526,7 @@ internal sealed class DreamIcon(RenderTargetPool renderTargetPool, IDreamInterfa
         handle.RenderInRenderTarget(pong, () => {
             //we can use the color matrix shader here, since we don't need to blend
             //also because blend mode is none, we don't need to clear
-            var colorMatrix = iconMetaData.ColorMatrixToApply;
-
-            ShaderInstance colorShader = DreamViewOverlay.ColorInstance.Duplicate();
-            colorShader.SetParameter("colorMatrix", colorMatrix.GetMatrix4());
-            colorShader.SetParameter("offsetVector", colorMatrix.GetOffsetVector());
-            colorShader.SetParameter("isPlaneMaster",iconMetaData.IsPlaneMaster);
-            handle.UseShader(colorShader);
+            handle.UseShader(viewOverlay.GetColorShader(null, iconMetaData.IsPlaneMaster, iconMetaData.ColorMatrixToApply));
 
             handle.SetTransform(DreamViewOverlay.CreateRenderTargetFlipMatrix(pong.Size, (pong.Size/2 - frame.Size/2)));
             handle.DrawTextureRect(frame, new Box2(Vector2.Zero, frame.Size));

@@ -145,6 +145,19 @@ internal sealed class DMObject(DMCompiler compiler, int id, DreamPath path, DMOb
     }
 
     /// <summary>
+    /// Finds the value a var is given by the closest initialization proc, if it has one
+    /// </summary>
+    public (DMObject Owner, DMExpression Value)? GetRuntimeInitialValue(string varName) {
+        for (int i = InitializationProcAssignments.Count - 1; i >= 0; i--) {
+            var (name, assignment) = InitializationProcAssignments[i];
+            if (name == varName)
+                return (this, assignment.Value);
+        }
+
+        return Parent?.GetRuntimeInitialValue(varName);
+    }
+
+    /// <summary>
     /// Recursively searches for a global/static with the given name.
     /// </summary>
     /// <returns>Either the ID or null if no such global exists.</returns>

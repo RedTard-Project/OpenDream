@@ -517,6 +517,48 @@ public struct DreamValue : IDisposable, IEquatable<DreamValue> {
         return _floatValue.GetHashCode();
     }
 
+    /// <summary>
+    /// The same as a linear search using <see cref="Equals(DreamValue)"/>, but faster when looking for an object
+    /// </summary>
+    /// <returns>The index of the first value equal to this one, or -1</returns>
+    public int IndexIn(ReadOnlySpan<DreamValue> values) {
+        if (Type == DreamValueType.DreamObject && _refValue is DreamObject { Deleted: false } dreamObject) {
+            for (int i = 0; i < values.Length; i++) {
+                if (ReferenceEquals(values[i]._refValue, dreamObject))
+                    return i;
+            }
+
+            return -1;
+        }
+
+        for (int i = 0; i < values.Length; i++) {
+            if (values[i].Equals(this))
+                return i;
+        }
+
+        return -1;
+    }
+
+    /// <inheritdoc cref="IndexIn"/>
+    /// <returns>The index of the last value equal to this one, or -1</returns>
+    public int LastIndexIn(ReadOnlySpan<DreamValue> values) {
+        if (Type == DreamValueType.DreamObject && _refValue is DreamObject { Deleted: false } dreamObject) {
+            for (int i = values.Length - 1; i >= 0; i--) {
+                if (ReferenceEquals(values[i]._refValue, dreamObject))
+                    return i;
+            }
+
+            return -1;
+        }
+
+        for (int i = values.Length - 1; i >= 0; i--) {
+            if (values[i].Equals(this))
+                return i;
+        }
+
+        return -1;
+    }
+
     public static bool operator ==(DreamValue a, DreamValue b) {
         return a.Equals(b);
     }

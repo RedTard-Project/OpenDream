@@ -50,3 +50,11 @@ public readonly struct ViewRange {
         return $"{Width}x{Height}";
     }
 }
+
+/// <summary>
+/// The amount of tiles screen objects extend the screen past each side of the view
+/// </summary>
+public record struct ViewBorders(int Left, int Right, int Bottom, int Top) {
+    public Vector2i BottomLeft => new(Left, Bottom);
+    public Vector2i Size => new(Left + Right, Bottom + Top);
+}

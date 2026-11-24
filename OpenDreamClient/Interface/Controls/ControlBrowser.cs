@@ -31,6 +31,24 @@ internal sealed partial class ControlBrowser : InterfaceControl {
         { "txt", "text/plain" }
     };
 
+    /// <summary>
+    /// Creates the hubStorage object that browser-options=+byondstorage enables, and tells the page about it
+    /// </summary>
+    private const string HubStorageScript = """
+        (() => {
+            const prefix = 'byondstorage.';
+            window.hubStorage ??= {
+                getItem: async key => localStorage.getItem(prefix + key),
+                setItem: async (key, value) => localStorage.setItem(prefix + key, value),
+                removeItem: async key => localStorage.removeItem(prefix + key),
+                clear: async () => Object.keys(localStorage)
+                    .filter(key => key.startsWith(prefix))
+                    .forEach(key => localStorage.removeItem(key)),
+            };
+            document.dispatchEvent(new Event('byondstorageupdated'));
+        })();
+        """;
+
     [Dependency] private IResourceManager _resourceManager = default!;
     [Dependency] private IClientNetManager _netManager = default!;
     [Dependency] private IDreamResourceManager _dreamResource = default!;
@@ -179,26 +197,21 @@ internal sealed partial class ControlBrowser : InterfaceControl {
         // Also replace ';' with '&' because they're both usable here
         var queryParams = HttpUtility.ParseQueryString(query.Substring(1).Replace(';', '&'));
 
-        // We need to extract the control element (if one was included)
-        string? element = queryParams.Get("element");
-        queryParams.Remove("element");
+        if (queryParams.Get("browser-options") is { } browserOptions) {
+            queryParams.Remove("browser-options");
 
-        // Wrap each parameter in quotes so the entire value is used
-        foreach (var paramKey in queryParams.AllKeys) {
-            var paramValue = queryParams[paramKey];
-            if (paramValue == null)
-                continue;
-
-            queryParams.Set(paramKey, $"\"{paramValue}\"");
+            // TODO: This applies to every browser, and there's other options
+            if (browserOptions.Contains("byondstorage") && !browserOptions.Contains("-byondstorage"))
+                _webView.ExecuteJavaScript(HubStorageScript);
         }
 
-        // Reassemble the query params without element then convert to winset syntax
-        var modifiedQuery = queryParams.ToString();
-        modifiedQuery = HttpUtility.UrlDecode(modifiedQuery);
-        modifiedQuery = modifiedQuery!.Replace('&', ';'); // TODO: More robust parsing
+        // We need to extract the control element (if one was included)
+        string? element = queryParams.Get("element") ?? queryParams.Get("id");
+        queryParams.Remove("element");
+        queryParams.Remove("id");
 
-        // We can finally call winset
-        InterfaceManager.WinSet(element, modifiedQuery);
+        // We can finally call winset, which url-decodes the params
+        InterfaceManager.WinSet(element, queryParams.ToString() ?? string.Empty);
     }
 
     /// <summary>

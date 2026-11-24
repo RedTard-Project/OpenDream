@@ -90,6 +90,7 @@ internal partial class DMCodeTree {
                 NewList => true,
                 NewPath => true,
                 Rgb => true,
+                ScopeReference scopeReference => scopeReference.GetInitialList() != null,
                 // TODO: Check for circular reference loops here
                 // (Note that we do accidentally support global-field access somewhat when it gets const-folded by TryAsConstant before we get here)
                 GlobalField => false,
@@ -98,7 +99,7 @@ internal partial class DMCodeTree {
         }
     }
 
-    private class ObjectVarNode(DreamPath owner, DMASTObjectVarDefinition varDef) : VarNode {
+    private class ObjectVarNode(DMCodeTree codeTree, DreamPath owner, DMASTObjectVarDefinition varDef) : VarNode {
         private string VarName => varDef.Name;
         private bool IsStatic => varDef.IsStatic;
 
@@ -149,10 +150,7 @@ internal partial class DMCodeTree {
 
             // Initialize its value in the global init proc
             compiler.VerbosePrint($"Adding {dmObject.Path}/var/static/{global.Name} to global init on pass {pass}");
-            compiler.GlobalInitProc.DebugSource(value.Location);
-            value.EmitPushValue(new(compiler, dmObject, compiler.GlobalInitProc));
-            compiler.GlobalInitProc.Assign(DMReference.CreateGlobal(globalId));
-            compiler.GlobalInitProc.Pop();
+            codeTree._globalInits.Add(new(dmObject, globalId, value, null));
             return true;
         }
 
@@ -272,7 +270,7 @@ internal partial class DMCodeTree {
         }
     }
 
-    private class ProcGlobalVarNode(DreamPath owner, DMProc proc, DMASTProcStatementVarDeclaration varDecl) : VarNode {
+    private class ProcGlobalVarNode(DMCodeTree codeTree, int declIndex, DreamPath owner, DMProc proc, DMASTProcStatementVarDeclaration varDecl) : VarNode {
         private bool _defined;
 
         public override bool TryDefineVar(DMCompiler compiler, int pass) {
@@ -298,10 +296,7 @@ internal partial class DMCodeTree {
             if (value != null) {
                 // Initialize its value in the global init proc
                 compiler.VerbosePrint($"Adding {dmObject.Path}/proc/{proc.Name}/var/static/{global.Name} to global init on pass {pass}");
-                compiler.GlobalInitProc.DebugSource(value.Location);
-                value.EmitPushValue(new(compiler, dmObject, compiler.GlobalInitProc));
-                compiler.GlobalInitProc.Assign(DMReference.CreateGlobal(globalId));
-                compiler.GlobalInitProc.Pop();
+                codeTree._globalInits.Add(new(dmObject, globalId, value, value is ProcCall or Dereference { IsProcCall: true } ? declIndex : null));
             }
 
             return true;
@@ -314,7 +309,7 @@ internal partial class DMCodeTree {
 
     public void AddObjectVar(DreamPath owner, DMASTObjectVarDefinition varDef) {
         var node = GetDMObjectNode(owner);
-        var varNode = new ObjectVarNode(owner, varDef);
+        var varNode = new ObjectVarNode(this, owner, varDef);
 
         node.Children.Add(varNode);
         _waitingNodes.Add(varNode);

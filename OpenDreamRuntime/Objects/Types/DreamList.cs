@@ -22,6 +22,16 @@ public class DreamList : DreamObject, IDreamList {
     private readonly List<DreamValue> _elements;
     private Dictionary<DreamValue, DreamValue>? _associativeValues;
 
+    /// <summary>
+    /// Whether <see cref="_associativeValues"/> may have keys that aren't in <see cref="_elements"/>
+    /// </summary>
+    private bool _mayHaveStaleAssociations;
+
+    /// <summary>
+    /// Operators between two lists hash their values when they'd otherwise need more comparisons than this
+    /// </summary>
+    private const int HashedOperatorThreshold = 512;
+
     #if TOOLS
     private ProfilerMemory? _tracyContentsMemoryId;
     #endif
@@ -197,16 +207,27 @@ public class DreamList : DreamObject, IDreamList {
                 value.IncRef();
                 oldValue.DecRef();
                 _elements[keyInteger - 1] = value;
+                _mayHaveStaleAssociations |= _associativeValues != null;
             }
         } else {
-            if (!ContainsKey(key)) {
+            _associativeValues ??= new Dictionary<DreamValue, DreamValue>(1);
+            value.IncRef();
+
+            bool hadAssociation = _associativeValues.TryGetValue(key, out var oldValue);
+            bool mayBeInElements;
+            if (_mayHaveStaleAssociations || key.IsNull) // Deleted objects are equal to null, but have a different hash
+                mayBeInElements = true;
+            else if (hadAssociation)
+                mayBeInElements = false; // We already know that it's there
+            else
+                mayBeInElements = _associativeValues.Count != _elements.Count; // Otherwise, they're all other associated keys
+
+            if (mayBeInElements ? !ContainsKey(key) : !hadAssociation) {
                 _elements.Add(key);
                 key.IncRef();
             }
 
-            _associativeValues ??= new Dictionary<DreamValue, DreamValue>(1);
-            value.IncRef();
-            if (_associativeValues.TryGetValue(key, out var oldValue))
+            if (hadAssociation)
                 oldValue.DecRef();
 
             _associativeValues[key] = value;
@@ -216,7 +237,7 @@ public class DreamList : DreamObject, IDreamList {
     }
 
     public virtual void Remove(DreamValue value) {
-        int valueIndex = _elements.LastIndexOf(value);
+        int valueIndex = value.LastIndexIn(CollectionsMarshal.AsSpan(_elements));
 
         if (valueIndex != -1) {
             if (_associativeValues?.TryGetValue(value, out var associatedValue) is true)  {
@@ -239,14 +260,7 @@ public class DreamList : DreamObject, IDreamList {
 
     //Does not include associations
     public virtual bool ContainsKey(DreamValue value) {
-        var count = _elements.Count;
-
-        for (int i = 0; i < count; i++) {
-            if (_elements[i].Equals(value))
-                return true;
-        }
-
-        return false;
+        return value.IndexIn(CollectionsMarshal.AsSpan(_elements)) != -1;
     }
 
     public virtual bool ElementHasAssociation(DreamValue value) {
@@ -256,11 +270,71 @@ public class DreamList : DreamObject, IDreamList {
     public virtual int FindIndex(DreamValue value, int start = 1, int end = 0) {
         if (end == 0 || end > _elements.Count) end = _elements.Count + 1;
 
+        if (start >= 1 && start <= end) {
+            int index = value.IndexIn(CollectionsMarshal.AsSpan(_elements)[(start - 1)..(end - 1)]);
+
+            return (index == -1) ? 0 : index + start;
+        }
+
         for (int i = start; i < end; i++) {
             if (_elements[i - 1].Equals(value)) return i;
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Whether the operator between this and another list should hash the values of one of them instead of comparing each
+    /// </summary>
+    private bool ShouldHashOperator(DreamList other) {
+        // Lists with special behavior need their methods called for every value
+        return GetType() == typeof(DreamList) && other != this &&
+               (long)_elements.Count * other.GetLength() > HashedOperatorThreshold;
+    }
+
+    /// <summary>
+    /// Removes the last occurrence of every given value
+    /// </summary>
+    private void RemoveAll(DreamList values) {
+        if (!ShouldHashOperator(values)) {
+            foreach (DreamValue value in values.Enumerate())
+                Remove(value);
+
+            return;
+        }
+
+        var removeCounts = new Dictionary<DreamValue, int>();
+        foreach (DreamValue value in values.Enumerate()) {
+            var key = value.IsNull ? DreamValue.Null : value; // Deleted objects are null
+
+            removeCounts[key] = removeCounts.GetValueOrDefault(key) + 1;
+        }
+
+        // Deleting an object can run DM code, so that has to wait until after we're done
+        var removed = new List<DreamValue>();
+
+        // Shift everything that stays towards the end of the list, starting with the last element
+        int keptStart = _elements.Count;
+        for (int i = _elements.Count - 1; i >= 0; i--) {
+            var value = _elements[i];
+            var key = value.IsNull ? DreamValue.Null : value;
+
+            if (removeCounts.TryGetValue(key, out int count) && count > 0) {
+                removeCounts[key] = count - 1;
+                if (_associativeValues?.Remove(value, out var associatedValue) is true)
+                    removed.Add(associatedValue);
+
+                removed.Add(value);
+            } else {
+                _elements[--keptStart] = value;
+            }
+        }
+
+        _elements.RemoveRange(0, keptStart);
+        UpdateTracyContentsMemory();
+
+        foreach (var value in removed)
+            value.DecRef();
     }
 
     public virtual void Cut(int start = 1, int end = 0) {
@@ -408,9 +482,7 @@ public class DreamList : DreamObject, IDreamList {
         DreamList listCopy = (DreamList)CreateCopy();
 
         if (b.TryGetValueAsDreamList(out var bList)) {
-            foreach (DreamValue value in bList.Enumerate()) {
-                listCopy.Remove(value);
-            }
+            listCopy.RemoveAll(bList);
         } else {
             listCopy.Remove(b);
         }
@@ -461,6 +533,8 @@ public class DreamList : DreamObject, IDreamList {
         if (b.TryGetValueAsIDreamList(out var bList)) {
             if (bList == this) {
                 Cut();
+            } else if (bList is DreamList bDreamList) {
+                RemoveAll(bDreamList);
             } else {
                 foreach (DreamValue key in bList.Enumerate()) {
                     Remove(key);
@@ -517,8 +591,15 @@ public class DreamList : DreamObject, IDreamList {
 
     public override DreamValue OperatorCombine(DreamValue b, DMProcState state) {
         if (b.TryGetValueAsDreamList(out var bList)) {
+            HashSet<DreamValue>? existing = null;
+            if (ShouldHashOperator(bList) || (GetType() == typeof(DreamList) && bList != this && bList.GetLength() > HashedOperatorThreshold)) {
+                existing = new HashSet<DreamValue>(_elements.Count + bList.GetLength());
+                foreach (DreamValue value in _elements)
+                    existing.Add(value.IsNull ? DreamValue.Null : value); // Deleted objects are null
+            }
+
             foreach (DreamValue value in bList.Enumerate()) {
-                if (ContainsKey(value))
+                if (existing != null ? !existing.Add(value.IsNull ? DreamValue.Null : value) : ContainsKey(value))
                     continue;
 
                 if (bList._associativeValues?.TryGetValue(value, out var associatedValue) is true)

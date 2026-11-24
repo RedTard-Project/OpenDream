@@ -6,6 +6,7 @@ using OpenDreamClient.Interface.Controls;
 using OpenDreamShared.Interface.Descriptors;
 using OpenDreamShared.Interface.DMF;
 using OpenDreamClient.Interface.Prompts;
+using OpenDreamClient.Rendering;
 using OpenDreamClient.Resources;
 using OpenDreamClient.Resources.ResourceTypes;
 using OpenDreamShared.Dream;
@@ -70,9 +71,11 @@ internal sealed partial class DreamInterfaceManager : IDreamInterfaceManager {
                 value = new(Math.Min(value.Width, 45), Math.Min(value.Height, 45));
 
             _view = value;
-            DefaultMap?.UpdateViewRange(_view);
+            DefaultMap?.UpdateViewRange(_view, Borders);
         }
     }
+
+    public ViewBorders Borders { get; private set; }
 
     public bool ShowPopupMenus { get; private set; } = true;
     public int IconSize { get; private set; }
@@ -350,8 +353,20 @@ internal sealed partial class DreamInterfaceManager : IDreamInterfaceManager {
     }
 
     public void FrameUpdate(FrameEventArgs frameEventArgs) {
-        if (DefaultMap != null)
-            DefaultMap.Viewport.Eye = _eyeManager.CurrentEye;
+        if (DefaultMap == null)
+            return;
+
+        if (_entitySystemManager.TryGetEntitySystem(out ClientScreenOverlaySystem? screenOverlaySystem)) {
+            var borders = screenOverlaySystem.CalculateBorders(View, IconSize);
+
+            if (borders != Borders) {
+                Borders = borders;
+                DefaultMap.UpdateViewRange(View, Borders);
+            }
+        }
+
+        DefaultMap.Update(_eyeManager.CurrentEye, Borders);
+        DefaultMap.UpdateOnSize(frameEventArgs.DeltaSeconds);
     }
 
     public InterfaceElement? FindElementWithId(string id) {
@@ -455,6 +470,13 @@ internal sealed partial class DreamInterfaceManager : IDreamInterfaceManager {
     }
 
     public void RunCommand(string fullCommand, bool repeating = false) {
+        if (fullCommand.Contains('\n')) { // Every line is its own command
+            foreach (var command in fullCommand.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                RunCommand(command, repeating);
+
+            return;
+        }
+
         switch (fullCommand) {
             case not null when fullCommand.StartsWith(".quit"):
                 _gameController.Shutdown(".quit used");
@@ -507,62 +529,7 @@ internal sealed partial class DreamInterfaceManager : IDreamInterfaceManager {
                         verbSystem.ExecuteVerb(verbSrc, verbId);
                     }
                 } else { // Attempt to parse the given arguments
-                    List<string> args = new List<string>();
-                    StringBuilder currentArg = new();
-                    bool stringCapture = false;
-                    for (int i = 0; i < argsRaw[1].Length; i++) {
-                        if (argsRaw[1][i] == '"') {
-                            currentArg.Append('"');
-                            if (stringCapture) {
-                                var result = HandleEmbeddedWinget(null, currentArg.ToString(), out var hadWinget);
-
-                                // 64x64 or 64,64 gets split into two "64 64" args
-                                if (hadWinget && result.Split(['x', ',']) is {Length: 2} wingetSplit &&
-                                    float.TryParse(wingetSplit[0], out _) && float.TryParse(wingetSplit[1], out _)) {
-                                    args.Add(wingetSplit[0]);
-                                    args.Add(wingetSplit[1]);
-                                } else {
-                                    args.Add(result);
-                                }
-
-                                currentArg.Clear();
-                            }
-
-                            stringCapture = !stringCapture;
-                            continue;
-                        }
-
-                        if (argsRaw[1][i] == ' ' && !stringCapture) {
-                            var result = HandleEmbeddedWinget(null, currentArg.ToString(), out var hadWinget);
-
-                            // 64x64 or 64,64 gets split into two "64 64" args
-                            if (hadWinget && result.Split(['x', ',']) is {Length: 2} wingetSplit &&
-                                float.TryParse(wingetSplit[0], out _) && float.TryParse(wingetSplit[1], out _)) {
-                                args.Add(wingetSplit[0]);
-                                args.Add(wingetSplit[1]);
-                            } else {
-                                args.Add(result);
-                            }
-
-                            currentArg.Clear();
-                            continue;
-                        }
-
-                        currentArg.Append(argsRaw[1][i]);
-                    }
-
-                    if (currentArg.ToString() is { } arg && !string.IsNullOrEmpty(arg)) {
-                        var result = HandleEmbeddedWinget(null, arg, out var hadWinget);
-
-                        // 64x64 or 64,64 gets split into two "64 64" args
-                        if (hadWinget && result.Split(['x', ',']) is {Length: 2} wingetSplit &&
-                            float.TryParse(wingetSplit[0], out _) && float.TryParse(wingetSplit[1], out _)) {
-                            args.Add(wingetSplit[0]);
-                            args.Add(wingetSplit[1]);
-                        } else {
-                            args.Add(result);
-                        }
-                    }
+                    var args = ParseCommandArguments(argsRaw[1]);
 
                     if (args.Count != verbInfo.Arguments.Length) {
                         _sawmill.Error(
@@ -596,6 +563,52 @@ internal sealed partial class DreamInterfaceManager : IDreamInterfaceManager {
                 break;
             }
         }
+    }
+
+    /// <summary>
+    /// Splits the arguments of a command. They're separated by whitespace, and quotes keep one together.
+    /// </summary>
+    private List<string> ParseCommandArguments(string argsText) {
+        var args = new List<string>();
+        var currentArg = new StringBuilder();
+        bool inQuotes = false, wasQuoted = false;
+
+        void FinishArgument() {
+            if (currentArg.Length == 0 && !wasQuoted)
+                return;
+
+            var result = HandleEmbeddedWinget(null, currentArg.ToString(), out var hadWinget);
+
+            // 64x64 or 64,64 gets split into two "64 64" args
+            if (hadWinget && !wasQuoted && result.Split(['x', ',']) is {Length: 2} wingetSplit &&
+                float.TryParse(wingetSplit[0], out _) && float.TryParse(wingetSplit[1], out _)) {
+                args.Add(wingetSplit[0]);
+                args.Add(wingetSplit[1]);
+            } else {
+                args.Add(result);
+            }
+
+            currentArg.Clear();
+            wasQuoted = false;
+        }
+
+        for (int i = 0; i < argsText.Length; i++) {
+            char c = argsText[i];
+
+            if (c == '"') {
+                inQuotes = !inQuotes;
+                wasQuoted = true;
+            } else if (inQuotes && c == '\\' && i + 1 < argsText.Length && argsText[i + 1] is ('"' or '\\')) {
+                currentArg.Append(argsText[++i]);
+            } else if (!inQuotes && char.IsWhiteSpace(c)) {
+                FinishArgument();
+            } else {
+                currentArg.Append(c);
+            }
+        }
+
+        FinishArgument(); // The closing quote is allowed to be missing
+        return args;
     }
 
     public void StopRepeatingCommand(string command) {
@@ -637,24 +650,25 @@ internal sealed partial class DreamInterfaceManager : IDreamInterfaceManager {
     }
 
     public void WinSet(string? controlId, string winsetParams) {
-        // The server runs these through list2params first
-        var winsets = ParamsHelpers.EnumerateParams2List(winsetParams);
+        var winsets = ParamsHelpers.EnumerateWinsetParams(winsetParams).ToList();
 
         if (string.IsNullOrEmpty(controlId)) {
-            var winsetsDict = winsets.ToDictionary();
-
             // id=abc overrides the elements of other winsets without an element
-            string? elementOverride = winsetsDict.GetValueOrDefault("id") as string;
+            string? elementOverride = null;
+            foreach (var winset in winsets) {
+                if (winset.Key == "id")
+                    elementOverride = winset.Value;
+            }
 
-            foreach (var winset in winsetsDict) {
-                if (winset is { Key: "command", Value: string command }) {
-                    RunCommand(HandleEmbeddedWinget(controlId, command, out _));
+            foreach (var winset in winsets) {
+                if (winset.Key == "command") {
+                    RunCommand(HandleEmbeddedWinget(controlId, winset.Value, out _));
                     continue;
                 } else if (winset.Key == "id") { // This is used to set the target, not an actual winset
                     continue;
                 }
 
-                var parsed = DMFParser.GlobalWinSet($"{winset.Key}={winset.Value}", _serializationManager);
+                var parsed = DMFParser.GlobalWinSet(winset.AsDMF(), _serializationManager);
                 if (parsed is null)
                     continue;
 
@@ -702,9 +716,17 @@ internal sealed partial class DreamInterfaceManager : IDreamInterfaceManager {
             }
         } else {
             InterfaceElement? element = FindElementWithId(controlId);
-            var attributes = winsets
-                .Select(pair => (pair.Key, pair.Value as string ?? string.Empty))
-                .ToDictionary();
+            var attributes = new Dictionary<string, string>();
+            foreach (var winset in winsets)
+                attributes[winset.Key] = winset.Value;
+
+            // An empty parent removes the control
+            if (attributes.TryGetValue("parent", out var newParent) && newParent == string.Empty) {
+                if (element is InterfaceControl { Window: { } window } control)
+                    window.RemoveChild(control);
+
+                return;
+            }
 
             if (element == null && attributes.TryGetValue("parent", out var parentId)) {
                 var parent = FindElementWithId(parentId);
@@ -1056,6 +1078,7 @@ public interface IDreamInterfaceManager {
     public ControlInfo? DefaultInfo { get; }
     public ControlMap? DefaultMap { get; }
     public ViewRange View { get; }
+    public ViewBorders Borders { get; }
     public bool ShowPopupMenus { get; }
     public int IconSize { get; }
     public CursorHolder Cursors { get; }

@@ -8,6 +8,7 @@ using OpenDreamShared.Dream;
 using Robust.Client.Graphics;
 using Robust.Client.UserInterface;
 using Robust.Client.UserInterface.Controls;
+using Robust.Shared.Graphics;
 using Robust.Shared.Input;
 
 namespace OpenDreamClient.Interface.Controls;
@@ -22,6 +23,10 @@ public sealed partial class ControlMap(ControlDescriptor controlDescriptor, Cont
     private ControlDescriptorMap MapDescriptor => (ControlDescriptorMap)ElementDescriptor;
 
     private ClientObjectReference? _atomUnderMouse;
+
+    private readonly Eye _eye = new();
+    private Vector2i _reportedSize;
+    private float _timeSinceSizeReport;
 
     protected override void UpdateElementDescriptor() {
         base.UpdateElementDescriptor();
@@ -38,12 +43,12 @@ public sealed partial class ControlMap(ControlDescriptor controlDescriptor, Cont
             "normal" or _ => ScalingViewportStretchMode.Nearest
         };
 
-        UpdateViewRange(InterfaceManager.View);
+        UpdateViewRange(InterfaceManager.View, InterfaceManager.Borders);
     }
 
-    public void UpdateViewRange(ViewRange view) {
-        var viewWidth = Math.Max(view.Width, 1);
-        var viewHeight = Math.Max(view.Height, 1);
+    public void UpdateViewRange(ViewRange view, ViewBorders borders) {
+        var viewWidth = Math.Max(view.Width, 1) + borders.Size.X;
+        var viewHeight = Math.Max(view.Height, 1) + borders.Size.Y;
 
         Viewport.ViewportSize = new Vector2i(viewWidth, viewHeight) * InterfaceManager.IconSize;
         if (MapDescriptor.IconSize.Value != 0) {
@@ -57,6 +62,43 @@ public sealed partial class ControlMap(ControlDescriptor controlDescriptor, Cont
             Viewport.SetWidth = float.NaN;
             Viewport.SetHeight = float.NaN;
         }
+    }
+
+    /// <summary>
+    /// Called every frame, only on the default map
+    /// </summary>
+    public void Update(IEye eye, ViewBorders borders) {
+        // The viewport is centered on the eye, but the view isn't centered in the viewport if its borders are uneven
+        _eye.Position = eye.Position;
+        _eye.Rotation = eye.Rotation;
+        _eye.Zoom = eye.Zoom;
+        _eye.DrawFov = eye.DrawFov;
+        _eye.DrawLight = eye.DrawLight;
+        _eye.Offset = eye.Offset + new Vector2(borders.Right - borders.Left, borders.Top - borders.Bottom) / 2f;
+        Viewport.Eye = _eye;
+    }
+
+    /// <summary>
+    /// Runs the on-size command if this has been resized
+    /// </summary>
+    /// <remarks>Resizing is continuous while a splitter is dragged, so this limits how often the command is run</remarks>
+    public void UpdateOnSize(float frameTime) {
+        _timeSinceSizeReport += frameTime;
+
+        var size = (Vector2i)UIElement.Size;
+        if (size == _reportedSize || _timeSinceSizeReport < 0.2f)
+            return;
+
+        _reportedSize = size;
+        _timeSinceSizeReport = 0f;
+
+        var command = ControlDescriptor.OnSize.AsRaw();
+        if (string.IsNullOrWhiteSpace(command) || size.X <= 0 || size.Y <= 0)
+            return;
+
+        InterfaceManager.RunCommand(command
+            .Replace("[[width]]", size.X.ToString())
+            .Replace("[[height]]", size.Y.ToString()));
     }
 
     protected override Control CreateUIElement() {
@@ -78,7 +120,7 @@ public sealed partial class ControlMap(ControlDescriptor controlDescriptor, Cont
         else
             OnHideEvent();
 
-        UpdateViewRange(InterfaceManager.View);
+        UpdateViewRange(InterfaceManager.View, InterfaceManager.Borders);
 
         return new PanelContainer { StyleClasses = {"MapBackground"}, Children = { Viewport } };
     }

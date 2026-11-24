@@ -1,4 +1,5 @@
 /dm_filter
+	var/type
 	var/x
 	var/y
 	var/icon

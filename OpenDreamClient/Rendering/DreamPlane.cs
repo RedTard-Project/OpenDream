@@ -1,26 +1,52 @@
 ﻿using OpenDreamShared.Dream;
 using Robust.Client.Graphics;
-using Robust.Shared.Utility;
 
 namespace OpenDreamClient.Rendering;
 
 internal sealed class DreamPlane(IRenderTexture mainRenderTarget) : IDisposable {
-    public IRenderTexture RenderTarget => _temporaryRenderTarget ?? mainRenderTarget;
+    /// <summary>
+    /// The plane after its master's color and filters are applied
+    /// </summary>
+    public IRenderTexture RenderTarget => _needsMasterPass ? _masterRenderTarget! : mainRenderTarget;
+
     public RendererMetaData? Master;
     public bool Enabled = true;
 
+    /// <summary>
+    /// Whether there's nothing to see on this plane this frame
+    /// </summary>
+    public bool IsEmpty;
+
+    /// <summary>
+    /// Whether this plane is part of what ends up on the screen this frame
+    /// </summary>
+    public bool IsNeeded;
+
+    /// <summary>
+    /// Whether this gets drawn to the screen instead of only being the render_source of something else
+    /// </summary>
+    public bool DrawsToScreen => Master?.RenderTarget?.StartsWith('*') is not true;
+
     public readonly List<RendererMetaData> Sprites = new();
 
-    private IRenderTexture? _temporaryRenderTarget;
+    private const int MaskInverse = 1; // The MASK_INVERSE define
+
+    private IRenderTexture? _masterRenderTarget;
+    private bool _needsMasterPass;
+
+    // Render targets get cleared when they're drawn to, but there's no need to clear one that's already empty
+    private bool _mainIsClear, _masterIsClear;
 
     public void Clear() {
         Master = null;
         Sprites.Clear();
-        _temporaryRenderTarget = null;
+        _needsMasterPass = false;
     }
 
     public void Dispose() {
         mainRenderTarget.Dispose();
+        _masterRenderTarget?.Dispose();
+        _masterRenderTarget = null;
         Clear();
     }
 
@@ -31,40 +57,94 @@ internal sealed class DreamPlane(IRenderTexture mainRenderTarget) : IDisposable 
     public void SetMainRenderTarget(IRenderTexture renderTarget) {
         mainRenderTarget.Dispose();
         mainRenderTarget = renderTarget;
+        _mainIsClear = false;
+
+        _masterRenderTarget?.Dispose();
+        _masterRenderTarget = null;
     }
 
     /// <summary>
-    /// Sets this plane's render target until the next <see cref="Clear()"/>
+    /// Sets the plane master until the next <see cref="Clear()"/>, for one with a render_target
     /// </summary>
-    public void SetTemporaryRenderTarget(IRenderTexture renderTarget) {
-        DebugTools.Assert(_temporaryRenderTarget == null, "Temporary render target has already been set");
-        _temporaryRenderTarget = renderTarget;
+    /// <param name="createRenderTarget">Creates a render target with the size of the viewport</param>
+    /// <returns>The render target that'll contain the plane with the master's color and filters applied</returns>
+    public IRenderTexture SetMasterWithTarget(RendererMetaData master, Func<IRenderTexture> createRenderTarget) {
+        Master = master;
+
+        // Without any of these, the second pass would only be making a copy
+        _needsMasterPass = master.MainIcon?.Appearance?.Filters.Length > 0 ||
+                           !master.ColorMatrixToApply.Equals(ColorMatrix.Identity) ||
+                           !master.AlphaToApply.Equals(1f) ||
+                           master.ColorToApply != Color.White;
+        if (_needsMasterPass && _masterRenderTarget == null) {
+            _masterRenderTarget = createRenderTarget();
+            _masterIsClear = false;
+        }
+
+        return RenderTarget;
+    }
+
+    /// <summary>
+    /// Determine whether there's anything to see on this plane, going by which render sources are currently known to be empty
+    /// </summary>
+    public bool HasVisibleContents(DreamViewOverlay overlay) {
+        if (!Enabled)
+            return false;
+
+        if (Master != null) {
+            if (Master.AlphaToApply <= 0f)
+                return false;
+
+            // Masking with something that's empty leaves nothing
+            foreach (var filter in Master.MainIcon?.Appearance?.Filters ?? []) {
+                if (filter is DreamFilterAlpha alphaFilter && (alphaFilter.Flags & MaskInverse) == 0 &&
+                    overlay.IsEmptyRenderSource(alphaFilter.RenderSource))
+                    return false;
+            }
+        }
+
+        foreach (var sprite in Sprites) {
+            if (!overlay.IsEmptyRenderSource(sprite))
+                return true;
+        }
+
+        return CanMasterDrawEmpty();
     }
 
     /// <summary>
     /// Clears this plane's render target, then draws all the plane's icons onto it
     /// </summary>
     public void Draw(DreamViewOverlay overlay, DrawingHandleWorld handle, Box2 worldAABB) {
-        // Draw all icons
-        handle.RenderInRenderTarget(mainRenderTarget, () => {
-            if (!Enabled) // Inside the RenderInRenderTarget() to ensure it gets cleared
-                return;
+        if (!IsNeeded)
+            return;
 
-            foreach (var sprite in Sprites) {
-                var positionOffset = -worldAABB.BottomLeft;
+        if (!IsEmpty || !_mainIsClear) {
+            // Draw all icons
+            handle.RenderInRenderTarget(mainRenderTarget, () => {
+                if (IsEmpty) // Inside the RenderInRenderTarget() to ensure it gets cleared
+                    return;
 
-                if (sprite.HasRenderSource && overlay.RenderSourceLookup.TryGetValue(sprite.RenderSource!, out var renderSourceTexture)) {
-                    sprite.TextureOverride = renderSourceTexture.Texture;
+                foreach (var sprite in Sprites) {
+                    if (overlay.IsEmptyRenderSource(sprite))
+                        continue;
+
+                    var positionOffset = -worldAABB.BottomLeft;
+
+                    if (sprite.HasRenderSource && overlay.RenderSourceLookup.TryGetValue(sprite.RenderSource!, out var renderSourceTexture)) {
+                        sprite.TextureOverride = renderSourceTexture.Texture;
+                    }
+
+                    overlay.DrawIcon(handle, mainRenderTarget.Size, sprite, positionOffset);
                 }
+            }, new Color());
 
-                overlay.DrawIcon(handle, mainRenderTarget.Size, sprite, positionOffset);
-            }
-        }, new Color());
+            _mainIsClear = IsEmpty;
+        }
 
-        if (_temporaryRenderTarget != null) {
+        if (_needsMasterPass && (!IsEmpty || !_masterIsClear)) {
             // Draw again, but with the color applied
-            handle.RenderInRenderTarget(_temporaryRenderTarget, () => {
-                if (Master == null || !Enabled)
+            handle.RenderInRenderTarget(_masterRenderTarget!, () => {
+                if (Master == null || IsEmpty)
                     return;
 
                 Master.TextureOverride = mainRenderTarget.Texture;
@@ -73,11 +153,34 @@ internal sealed class DreamPlane(IRenderTexture mainRenderTarget) : IDisposable 
                 if (texture == null)
                     return;
 
+                var color = Master.ColorToApply;
+                color.A *= Master.AlphaToApply;
+
                 handle.UseShader(overlay.GetBlendAndColorShader(Master, useOverlayMode: true));
-                handle.SetTransform(DreamViewOverlay.CreateRenderTargetFlipMatrix(_temporaryRenderTarget.Size, Master.MainIcon?.TextureRenderOffset ?? Vector2.Zero));
-                handle.DrawTextureRect(texture, new Box2(Vector2.Zero, texture.Size), Master.ColorToApply);
+                handle.SetTransform(DreamViewOverlay.CreateRenderTargetFlipMatrix(_masterRenderTarget!.Size, Master.MainIcon?.TextureRenderOffset ?? Vector2.Zero));
+                handle.DrawTextureRect(texture, new Box2(Vector2.Zero, texture.Size), color);
             }, new Color());
+
+            _masterIsClear = IsEmpty;
         }
+    }
+
+    /// <summary>
+    /// Whether the plane master's color or filters would result in something visible on an empty plane
+    /// </summary>
+    private bool CanMasterDrawEmpty() {
+        if (Master == null)
+            return false;
+
+        if (Master.ColorMatrixToApply.GetOffsetVector() != default)
+            return true;
+
+        foreach (var filter in Master.MainIcon?.Appearance?.Filters ?? []) {
+            if (filter is DreamFilterLayer or DreamFilterColor or DreamFilterRays)
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>

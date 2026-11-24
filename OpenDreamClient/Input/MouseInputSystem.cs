@@ -261,7 +261,7 @@ internal sealed partial class MouseInputSystem : SharedMouseInputSystem {
         UIBox2i viewportBox = viewport.GetDrawBox();
         Vector2 screenLocPos = (args.RelativePixelPosition - viewportBox.TopLeft) / viewportBox.Size * viewport.ViewportSize;
         float screenLocY = viewport.ViewportSize.Y - screenLocPos.Y; // Flip the Y
-        ScreenLocation screenLoc = new ScreenLocation((int)screenLocPos.X, (int)screenLocY, 32); // TODO: icon_size other than 32
+        ScreenLocation screenLoc = GetMouseScreenLocation(screenLocPos.X, screenLocY);
 
         // TODO: Take icon transformations into account for iconPos
         return new(screenLoc, right, middle, shift, ctrl, alt, iconPos.X, iconPos.Y);
@@ -275,10 +275,20 @@ internal sealed partial class MouseInputSystem : SharedMouseInputSystem {
         UIBox2i viewportBox = viewport.GetDrawBox();
         Vector2 screenLocPos = (relativePos - viewportBox.TopLeft) / viewportBox.Size * viewport.ViewportSize;
         float screenLocY = viewport.ViewportSize.Y - screenLocPos.Y; // Flip the Y
-        ScreenLocation screenLoc = new ScreenLocation((int) screenLocPos.X, (int) screenLocY, 32); // TODO: icon_size other than 32
+        ScreenLocation screenLoc = GetMouseScreenLocation(screenLocPos.X, screenLocY);
 
         // TODO: Take icon transformations into account for iconPos
         return new(screenLoc, false, false, false, false, false, iconPos.X, iconPos.Y);
+    }
+
+    /// <summary>
+    /// Converts a position in the viewport to one relative to the view, which doesn't include its borders
+    /// </summary>
+    private ScreenLocation GetMouseScreenLocation(float viewportX, float viewportY) {
+        const int iconSize = 32; // TODO: icon_size other than 32
+        var border = _dreamInterfaceManager.Borders.BottomLeft * iconSize;
+
+        return new ScreenLocation((int)viewportX - border.X, (int)viewportY - border.Y, iconSize);
     }
 
     private bool HasMouseEventEnabled(ClientObjectReference atomRef, AtomMouseEvents mouseEvent) {

@@ -161,19 +161,33 @@ public sealed partial class ControlWindow : InterfaceControl {
     }
 
     /// <summary>
+    /// The current size of the area containing this window's controls.
+    /// Controls are positioned in virtual pixels, so this isn't the PixelSize.
+    /// </summary>
+    public Vector2i CanvasSize => (Vector2i)_canvas.Size;
+
+    public void RemoveChild(InterfaceControl control) {
+        if (!ChildControls.Remove(control))
+            return;
+
+        control.UIElement.Orphan();
+    }
+
+    /// <summary>
     /// Updates the control's anchoring position to the window's current size.
     /// Also updates other controls' anchoring position if they have a size of 0.
     /// </summary>
     /// <param name="control">The control triggering the anchor update</param>
     public void UpdateAnchorPosition(InterfaceControl control) {
-        control.AnchorPosition = _canvas.PixelSize;
+        var canvasSize = CanvasSize;
+        control.AnchorPosition = canvasSize;
 
         // Also update the anchor position for anything with a size of 0
         foreach (var child in ChildControls) {
             if (child.UIElement.SetWidth == 0)
-                child.AnchorPosition = child.AnchorPosition with {X = _canvas.PixelWidth + child.Size.X};
+                child.AnchorPosition = child.AnchorPosition with {X = canvasSize.X + child.Size.X};
             if (child.UIElement.SetHeight == 0)
-                child.AnchorPosition = child.AnchorPosition with {Y = _canvas.PixelHeight + child.Size.Y};
+                child.AnchorPosition = child.AnchorPosition with {Y = canvasSize.Y + child.Size.Y};
         }
 
         UpdateAnchors();

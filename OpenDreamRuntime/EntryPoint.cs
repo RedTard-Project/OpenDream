@@ -7,6 +7,7 @@ using Robust.Shared.ContentPack;
 using Robust.Shared.Timing;
 using Robust.Shared.Prototypes;
 using Robust.Shared.Utility;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 
@@ -24,6 +25,10 @@ namespace OpenDreamRuntime {
         private ServerVerbSystem? _serverVerbSystem;
 
         public override void Init() {
+            // DM is not affected by the host's locale ("0.5" must never become "0,5")
+            CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+            CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
+
             IComponentFactory componentFactory = IoCManager.Resolve<IComponentFactory>();
             componentFactory.DoAutoRegistrations();
 
